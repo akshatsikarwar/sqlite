@@ -62,7 +62,11 @@
 ** of the file.
 */
 #ifndef SQLITE_TEMP_FILE_PREFIX
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+# define SQLITE_TEMP_FILE_PREFIX "sqlsort_"
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 # define SQLITE_TEMP_FILE_PREFIX "etilqs_"
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 #endif
 
 /*

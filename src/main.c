@@ -15,6 +15,9 @@
 ** accessed by users of the library.
 */
 #include "sqliteInt.h"
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+#include <sqlglue.h>
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 
 #ifdef SQLITE_ENABLE_FTS3
 # include "fts3.h"
@@ -25,6 +28,13 @@
 #if defined(SQLITE_ENABLE_ICU) || defined(SQLITE_ENABLE_ICU_COLLATIONS)
 # include "sqliteicu.h"
 #endif
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+# include "comdb2systbl.h"
+# ifdef SQLITE_ENABLE_SERIES
+#  include "series.h"
+# endif
+# include <logmsg.h>
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 #ifdef SQLITE_ENABLE_JSON1
 int sqlite3Json1Init(sqlite3*);
 #endif
@@ -34,6 +44,9 @@ int sqlite3StmtVtabInit(sqlite3*);
 #ifdef SQLITE_ENABLE_FTS5
 int sqlite3Fts5Init(sqlite3*);
 #endif
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+int sqlite3RegexpInit(sqlite3*);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 
 #ifndef SQLITE_AMALGAMATION
 /* IMPLEMENTATION-OF: R-46656-45156 The sqlite3_version[] string constant
@@ -105,6 +118,16 @@ char *sqlite3_temp_directory = 0;
 ** See also the "PRAGMA data_store_directory" SQL command.
 */
 char *sqlite3_data_directory = 0;
+
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+void sqlite3PCacheBufferSetup(void *p, int sz, int n){ return; }
+int sqlite3PcacheInitialize(void){ return 0; }
+void sqlite3PcacheShutdown(void){ return; }
+void sqlite3PCacheSetDefault(void){ return; }
+int sqlite3HeaderSizeBtree(void){ return 0; }
+int sqlite3HeaderSizePcache(void){ return 0; }
+int sqlite3HeaderSizePcache1(void){ return 0; }
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 
 /*
 ** Initialize SQLite.  
@@ -952,6 +975,19 @@ static int nocaseCollatingFunc(
   return r;
 }
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+/*
+** Dummy collating sequence used by datacopy index
+*/
+static int datacopyCollatingFunc(
+  void *NotUsed,
+  int nKey1, const void *pKey1,
+  int nKey2, const void *pKey2
+){
+  return 0;
+}
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
+
 /*
 ** Return the ROWID of the most recent insert
 */
@@ -1118,8 +1154,21 @@ static int sqlite3Close(sqlite3 *db, int forceZombie){
   ** SQLITE_BUSY if the connection can not be closed immediately.
   */
   if( !forceZombie && connectionIsBusy(db) ){
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    logmsg(LOGMSG_ERROR, "%s:%d SQLITE_BUSY\n", __FILE__, __LINE__);
+    cheap_stack_trace();
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     sqlite3ErrorWithMsg(db, SQLITE_BUSY, "unable to close due to unfinalized "
        "statements or unfinished backups");
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    {
+      sqlite3_stmt *pStmt = 0;
+      while( (pStmt = sqlite3_next_stmt(db,pStmt))!=0 ){
+        logmsg(LOGMSG_DEBUG, "%s:%d NOT FINALIZED: %p ==> {%s}\n",
+               __FILE__, __LINE__, db, sqlite3_sql(pStmt));
+      }
+    }
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     sqlite3_mutex_leave(db->mutex);
     return SQLITE_BUSY;
   }
@@ -1477,6 +1526,9 @@ const char *sqlite3ErrStr(int rc){
     /* SQLITE_NOTADB      */ "file is not a database",
     /* SQLITE_NOTICE      */ "notification message",
     /* SQLITE_WARNING     */ "warning message",
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    /* SQLITE_DEADLOCK    */ "transaction has been aborted due to deadlock",
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   };
   const char *zErr = "unknown error";
   switch( rc ){
@@ -1762,6 +1814,10 @@ int sqlite3CreateFunc(
   p = sqlite3FindFunction(db, zFunctionName, nArg, (u8)enc, 0);
   if( p && (p->funcFlags & SQLITE_FUNC_ENCMASK)==(u32)enc && p->nArg==nArg ){
     if( db->nVdbeActive ){
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+      logmsg(LOGMSG_ERROR, "%s:%d SQLITE_BUSY\n", __FILE__, __LINE__);
+      cheap_stack_trace();
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
       sqlite3ErrorWithMsg(db, SQLITE_BUSY, 
         "unable to delete/modify user-function due to active statements");
       assert( !db->mallocFailed );
@@ -2540,6 +2596,10 @@ static int createCollation(
   pColl = sqlite3FindCollSeq(db, (u8)enc2, zName, 0);
   if( pColl && pColl->xCmp ){
     if( db->nVdbeActive ){
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+      logmsg(LOGMSG_ERROR, "%s:%d SQLITE_BUSY\n", __FILE__, __LINE__);
+      cheap_stack_trace();
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
       sqlite3ErrorWithMsg(db, SQLITE_BUSY, 
         "unable to delete/modify collation sequence due to active statements");
       return SQLITE_BUSY;
@@ -2944,6 +3004,36 @@ int sqlite3ParseUri(
   return rc;
 }
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+static void register_lua_sfuncs(sqlite3 *db, struct sqlthdstate *thd)
+{
+  char **funcs;
+  int num_funcs;
+  get_sfuncs(&funcs, &num_funcs);
+  for (int i = 0; i < num_funcs; ++i) {
+    lua_func_arg_t *arg = malloc(sizeof(lua_func_arg_t));
+    arg->thd = thd;
+    arg->name = funcs[i];
+    sqlite3_create_function_v2(db, funcs[i], -1, SQLITE_UTF8, arg, lua_func,
+                               NULL, NULL, free);
+  }
+}
+
+static void register_lua_afuncs(sqlite3 *db, struct sqlthdstate *thd)
+{
+  char **funcs;
+  int num_funcs;
+  get_afuncs(&funcs, &num_funcs);
+  for (int i = 0; i < num_funcs; ++i) {
+    lua_func_arg_t *arg = malloc(sizeof(lua_func_arg_t));
+    arg->thd = thd;
+    arg->name = funcs[i];
+    sqlite3_create_function_v2(db, funcs[i], -1, SQLITE_UTF8, arg, NULL,
+                               lua_step, lua_final, free);
+  }
+}
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
+
 #if defined(SQLITE_HAS_CODEC)
 /*
 ** Process URI filename query parameters relevant to the SQLite Encryption
@@ -2989,6 +3079,9 @@ static int openDatabase(
   sqlite3 **ppDb,        /* OUT: Returned database handle */
   unsigned int flags,    /* Operational flags */
   const char *zVfs       /* Name of the VFS to use */
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  ,struct sqlthdstate *thd
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 ){
   sqlite3 *db;                    /* Store allocated handle here */
   int rc;                         /* Return code */
@@ -3138,6 +3231,9 @@ static int openDatabase(
   db->pDfltColl = sqlite3FindCollSeq(db, SQLITE_UTF8, sqlite3StrBINARY, 0);
   assert( db->pDfltColl!=0 );
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  createCollation(db, "DATACOPY", SQLITE_UTF8, 0, datacopyCollatingFunc, 0);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   /* Parse the filename/URI argument
   **
   ** Only allow sensible combinations of bits in the flags argument.  
@@ -3270,6 +3366,19 @@ static int openDatabase(
   }
 #endif
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  if( !db->mallocFailed && rc==SQLITE_OK ){
+    rc = comdb2SystblInit(db);
+  }
+  if( !db->mallocFailed && rc==SQLITE_OK){
+    rc = sqlite3RegexpInit(db);
+  }
+#ifdef SQLITE_ENABLE_SERIES
+  if( !db->mallocFailed && rc==SQLITE_OK ){
+    rc = sqlite3SeriesInit(db);
+  }
+#endif
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 #ifdef SQLITE_ENABLE_JSON1
   if( !db->mallocFailed && rc==SQLITE_OK){
     rc = sqlite3Json1Init(db);
@@ -3322,6 +3431,18 @@ opendb_out:
     sqlite3GlobalConfig.xSqllog(pArg, db, zFilename, 0);
   }
 #endif
+
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+  pthread_mutex_lock(&mutex);
+  /* these modify global structures */
+  if( thd!=NULL ){
+    register_lua_sfuncs(db, thd);
+    register_lua_afuncs(db, thd);
+  }
+  register_date_functions(db);
+  pthread_mutex_unlock(&mutex);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 #if defined(SQLITE_HAS_CODEC)
   if( rc==SQLITE_OK ) sqlite3CodecQueryParameters(db, 0, zOpen);
 #endif
@@ -3336,9 +3457,17 @@ opendb_out:
 int sqlite3_open(
   const char *zFilename, 
   sqlite3 **ppDb 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  , struct sqlthdstate *thd
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 ){
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  return openDatabase(zFilename, ppDb,
+                    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, 0, thd);
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   return openDatabase(zFilename, ppDb,
                       SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, 0);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 }
 int sqlite3_open_v2(
   const char *filename,   /* Database filename (UTF-8) */
@@ -3346,7 +3475,11 @@ int sqlite3_open_v2(
   int flags,              /* Flags */
   const char *zVfs        /* Name of VFS module to use */
 ){
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  return openDatabase(filename, ppDb, (unsigned int)flags, zVfs, NULL);
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   return openDatabase(filename, ppDb, (unsigned int)flags, zVfs);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 }
 
 #ifndef SQLITE_OMIT_UTF16
@@ -3374,8 +3507,13 @@ int sqlite3_open16(
   sqlite3ValueSetStr(pVal, -1, zFilename, SQLITE_UTF16NATIVE, SQLITE_STATIC);
   zFilename8 = sqlite3ValueText(pVal, SQLITE_UTF8);
   if( zFilename8 ){
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    rc = openDatabase(zFilename8, ppDb,
+                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, 0, 0);
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     rc = openDatabase(zFilename8, ppDb,
                       SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, 0);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     assert( *ppDb || rc==SQLITE_NOMEM );
     if( rc==SQLITE_OK && !DbHasProperty(*ppDb, 0, DB_SchemaLoaded) ){
       SCHEMA_ENC(*ppDb) = ENC(*ppDb) = SQLITE_UTF16NATIVE;
@@ -3746,6 +3884,9 @@ int sqlite3_file_control(sqlite3 *db, const char *zDbName, int op, void *pArg){
     sqlite3_file *fd;
     sqlite3BtreeEnter(pBtree);
     pPager = sqlite3BtreePager(pBtree);
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    if( pPager ){
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     assert( pPager!=0 );
     fd = sqlite3PagerFile(pPager);
     assert( fd!=0 );
@@ -3764,6 +3905,11 @@ int sqlite3_file_control(sqlite3 *db, const char *zDbName, int op, void *pArg){
     }else{
       rc = sqlite3OsFileControl(fd, op, pArg);
     }
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    } else {
+      rc = SQLITE_NOTFOUND;
+    }
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     sqlite3BtreeLeave(pBtree);
   }
   sqlite3_mutex_leave(db->mutex);

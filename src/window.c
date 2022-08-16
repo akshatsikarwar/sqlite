@@ -972,7 +972,11 @@ int sqlite3WindowRewrite(Parse *pParse, Select *p){
     p->pSrc = sqlite3SrcListAppend(pParse, 0, 0, 0);
     if( p->pSrc ){
       p->pSrc->a[0].pSelect = pSub;
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+      sqlite3SrcListAssignCursors(pParse, p->pSrc, p->recording);
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
       sqlite3SrcListAssignCursors(pParse, p->pSrc);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
       if( sqlite3ExpandSubquery(pParse, &p->pSrc->a[0]) ){
         rc = SQLITE_NOMEM;
       }else{
@@ -1030,7 +1034,9 @@ void sqlite3WindowListDelete(sqlite3 *db, Window *p){
 */
 static Expr *sqlite3WindowOffsetExpr(Parse *pParse, Expr *pExpr){
   if( 0==sqlite3ExprIsConstant(pExpr) ){
+#if !defined(SQLITE_BUILDING_FOR_COMDB2)
     if( IN_RENAME_OBJECT ) sqlite3RenameExprUnmap(pParse, pExpr);
+#endif /* !defined(SQLITE_BUILDING_FOR_COMDB2) */
     sqlite3ExprDelete(pParse->db, pExpr);
     pExpr = sqlite3ExprAlloc(pParse->db, TK_NULL, 0, 0);
   }

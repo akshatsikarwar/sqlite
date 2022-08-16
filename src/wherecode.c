@@ -568,6 +568,9 @@ static int codeEqualityTerm(
     if( pLevel->u.in.nIn==0 ){
       pLevel->addrNxt = sqlite3VdbeMakeLabel(pParse);
     }
+    if( iEq>0 && (pLoop->wsFlags && WHERE_IN_SEEKSCAN)==0 ){
+      pLoop->wsFlags |= WHERE_IN_EARLYOUT;
+    }
 
     i = pLevel->u.in.nIn;
     pLevel->u.in.nIn += nEq;
@@ -591,10 +594,9 @@ static int codeEqualityTerm(
           if( i==iEq ){
             pIn->iCur = iTab;
             pIn->eEndLoopOp = bRev ? OP_Prev : OP_Next;
-            if( iEq>0 && (pLoop->wsFlags & WHERE_VIRTUALTABLE)==0 ){
+            if( iEq>0 ){
               pIn->iBase = iReg - i;
               pIn->nPrefix = i;
-              pLoop->wsFlags |= WHERE_IN_EARLYOUT;
             }else{
               pIn->nPrefix = 0;
             }
@@ -603,6 +605,9 @@ static int codeEqualityTerm(
           }
           pIn++;
         }
+      }
+      if( iEq>0 ){
+        sqlite3VdbeAddOp3(v, OP_SeekHit, pLevel->iIdxCur, 0, iEq);
       }
     }else{
       pLevel->u.in.nIn = 0;
@@ -761,7 +766,7 @@ static int codeAllEqualityTerms(
   return regBase;
 }
 
-#ifndef SQLITE_LIKE_DOESNT_MATCH_BLOBS
+#if !defined(SQLITE_BUILDING_FOR_COMDB2) && !defined(SQLITE_LIKE_DOESNT_MATCH_BLOBS)
 /*
 ** If the most recently coded instruction is a constant range constraint
 ** (a string literal) that originated from the LIKE optimization, then 
@@ -795,9 +800,9 @@ static void whereLikeOptimizationStringFixup(
     pOp->p5 = (u8)(pLevel->iLikeRepCntr&1);    /* ASC or DESC */
   }
 }
-#else
+#else /* !defined(SQLITE_BUILDING_FOR_COMDB2) && !defined(SQLITE_LIKE_DOESNT_MATCH_BLOBS) */
 # define whereLikeOptimizationStringFixup(A,B,C)
-#endif
+#endif /* !defined(SQLITE_BUILDING_FOR_COMDB2) && !defined(SQLITE_LIKE_DOESNT_MATCH_BLOBS) */
 
 #ifdef SQLITE_ENABLE_CURSOR_HINTS
 /*
@@ -890,7 +895,11 @@ static int codeCursorHintFixExpr(Walker *pWalker, Expr *pExpr){
       pExpr->iTable = reg;
     }else if( pHint->pIdx!=0 ){
       pExpr->iTable = pHint->iIdxCur;
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+      /* NOTE: this breaks remote sql; discussion in progress to push this upstream */
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
       pExpr->iColumn = sqlite3ColumnOfIndex(pHint->pIdx, pExpr->iColumn);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
       assert( pExpr->iColumn>=0 );
     }
   }else if( pExpr->op==TK_AGG_FUNCTION ){
@@ -914,6 +923,9 @@ static void codeCursorHint(
   WhereInfo *pWInfo,    /* The where clause */
   WhereLevel *pLevel,   /* Which loop to provide hints for */
   WhereTerm *pEndRange  /* Hint this end-of-scan boundary term if not NULL */
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  ,int iLevel            /* Needed to skip non-remote cursors from hinting */
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 ){
   Parse *pParse = pWInfo->pParse;
   sqlite3 *db = pParse->db;
@@ -926,8 +938,41 @@ static void codeCursorHint(
   int i, j;
   struct CCurHint sHint;
   Walker sWalker;
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  /*
+    This is from conversation with sqlite. I need this mask
+    "....
+    I did not port the last sqlite patch related to cursor hints to comdb2.  
+    This last patch relates to how = predicates are coded. Adding that patch 
+    would require more restructuring in our code than I felt comfortable doing
+    at the time (or creating redundant predicates in hint expressions, which I
+    disliked as well).
 
+    Instead, I did two hacky things that achieve a similar effect and kept the
+    code working without the last patch,and forgot all about it:
+
+    1) commented out TERM_CODED term
+    2) put back logic to filter expressions that don't apply to hinted cursor
+    (which would skip coded loops, but regenerate some = predicates comdb2 
+    relied on --therefore the comment--, and missing after sqlite changes)
+    ..."
+   */
+  Bitmask msk;
+  WhereLoop *pWLoop;
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   if( OptimizationDisabled(db, SQLITE_CursorHints) ) return;
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  /* Really need to run this only for remote cursors */
+  /* hack, at this point only remcurs have it */
+  if( pWInfo->pTabList->a[iLevel].zDatabase==NULL )
+    return;
+
+  /* Need this Mask since the code lower ignores TERM_CODED !!!!*/
+  iCur = pLevel->iIdxCur;
+  msk = sqlite3WhereGetMask(&pWInfo->sMaskSet,
+                            pWInfo->pTabList->a[pLevel->iFrom].iCursor);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
+
   iCur = pLevel->iTabCur;
   assert( iCur==pWInfo->pTabList->a[pLevel->iFrom].iCursor );
   sHint.iTabCur = iCur;
@@ -937,9 +982,23 @@ static void codeCursorHint(
   sWalker.pParse = pParse;
   sWalker.u.pCCurHint = &sHint;
   pWC = &pWInfo->sWC;
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  pWLoop = pLevel->pWLoop;
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   for(i=0; i<pWC->nTerm; i++){
     pTerm = &pWC->a[i];
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    /* msk makes sure I consider only terms that
+       apply to the cursor in question */
+    if( !(pTerm->prereqAll & msk)) continue;
+    /* I need TERM_CODED commented out. Comes hand in hand with  msk,
+       i.e. msk avoid coded predicates for unrelated terms, while 
+       TERM_CODED commented allows me still encode equality operations
+       properly*/
+    if( pTerm->wtFlags & (TERM_VIRTUAL/*|TERM_CODED*/) ) continue;
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     if( pTerm->wtFlags & (TERM_VIRTUAL|TERM_CODED) ) continue;
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     if( pTerm->prereqAll & pLevel->notReady ) continue;
 
     /* Any terms specified as part of the ON(...) clause for any LEFT 
@@ -978,6 +1037,14 @@ static void codeCursorHint(
       if( ExprHasProperty(pTerm->pExpr, EP_FromJoin) ) continue;
     }
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    /* All terms in pWLoop->aLTerm[] except pEndRange are used to initialize
+    ** the cursor.  No need to hint initialization terms. */
+    if( pTerm!=pEndRange ){
+      for(j=0; j<pWLoop->nLTerm && pWLoop->aLTerm[j]!=pTerm; j++){}
+      if( j<pWLoop->nLTerm ) continue;
+    }
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     /* All terms in pWLoop->aLTerm[] except pEndRange are used to initialize
     ** the cursor.  These terms are not needed as hints for a pure range
     ** scan (that has no == terms) so omit them. */
@@ -985,6 +1052,7 @@ static void codeCursorHint(
       for(j=0; j<pLoop->nLTerm && pLoop->aLTerm[j]!=pTerm; j++){}
       if( j<pLoop->nLTerm ) continue;
     }
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 
     /* No subqueries or non-deterministic functions allowed */
     if( sqlite3ExprContainsSubquery(pTerm->pExpr) ) continue;
@@ -1010,7 +1078,11 @@ static void codeCursorHint(
   }
 }
 #else
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+# define codeCursorHint(A,B,C,D,E)  /* No-op */
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 # define codeCursorHint(A,B,C,D)  /* No-op */
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 #endif /* SQLITE_ENABLE_CURSOR_HINTS */
 
 /*
@@ -1042,10 +1114,15 @@ static void codeDeferredSeek(
 
   assert( iIdxCur>0 );
   assert( pIdx->aiColumn[pIdx->nColumn-1]==-1 );
-  
+
+  pWInfo->bDeferredSeek = 1;
   sqlite3VdbeAddOp3(v, OP_DeferredSeek, iIdxCur, 0, iCur);
   if( (pWInfo->wctrlFlags & WHERE_OR_SUBCLAUSE)
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+   && DbMaskAllZero(sqlite3ParseToplevel(pParse)->writeMask, 0)
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
    && DbMaskAllZero(sqlite3ParseToplevel(pParse)->writeMask)
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   ){
     int i;
     Table *pTab = pIdx->pTable;
@@ -1394,7 +1471,11 @@ Bitmask sqlite3WhereCodeOneLoopStart(
       pStart = pEnd;
       pEnd = pTerm;
     }
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    codeCursorHint(pTabItem, pWInfo, pLevel, pEnd, iLevel);
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     codeCursorHint(pTabItem, pWInfo, pLevel, pEnd);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     if( pStart ){
       Expr *pX;             /* The expression that defines the start bound */
       int r1, rTemp;        /* Registers for holding the start boundary */
@@ -1548,6 +1629,7 @@ Bitmask sqlite3WhereCodeOneLoopStart(
     u8 bSeekPastNull = 0;        /* True to seek past initial nulls */
     u8 bStopAtNull = 0;          /* Add condition to terminate at NULLs */
     int omitTable;               /* True if we use the index only */
+    int addrSeekScan = 0;        /* Opcode of the OP_SeekScan, if any */
 
 
     pIdx = pLoop->u.btree.pIndex;
@@ -1588,7 +1670,7 @@ Bitmask sqlite3WhereCodeOneLoopStart(
     if( pLoop->wsFlags & WHERE_TOP_LIMIT ){
       pRangeEnd = pLoop->aLTerm[j++];
       nExtraReg = MAX(nExtraReg, pLoop->u.btree.nTop);
-#ifndef SQLITE_LIKE_DOESNT_MATCH_BLOBS
+#if !defined(SQLITE_BUILDING_FOR_COMDB2) && !defined(SQLITE_LIKE_DOESNT_MATCH_BLOBS)
       if( (pRangeEnd->wtFlags & TERM_LIKEOPT)!=0 ){
         assert( pRangeStart!=0 );                     /* LIKE opt constraints */
         assert( pRangeStart->wtFlags & TERM_LIKEOPT );   /* occur in pairs */
@@ -1604,7 +1686,7 @@ Bitmask sqlite3WhereCodeOneLoopStart(
         pLevel->iLikeRepCntr <<=1;
         pLevel->iLikeRepCntr |= bRev ^ (pIdx->aSortOrder[nEq]==SQLITE_SO_DESC);
       }
-#endif
+#endif /* !defined(SQLITE_BUILDING_FOR_COMDB2) && !defined(SQLITE_LIKE_DOESNT_MATCH_BLOBS) */
       if( pRangeStart==0 ){
         j = pIdx->aiColumn[nEq];
         if( (j>=0 && pIdx->pTable->aCol[j].notNull==0) || j==XN_EXPR ){
@@ -1626,11 +1708,19 @@ Bitmask sqlite3WhereCodeOneLoopStart(
       SWAP(u8, nBtm, nTop);
     }
 
+    if( iLevel>0 && (pLoop->wsFlags & WHERE_IN_SEEKSCAN)!=0 ){
+      /* In case OP_SeekScan is used, ensure that the index cursor does not
+      ** point to a valid row for the first iteration of this loop. */
+      sqlite3VdbeAddOp1(v, OP_NullRow, iIdxCur);
+    }
+
     /* Generate code to evaluate all constraint terms using == or IN
     ** and store the values of those terms in an array of registers
     ** starting at regBase.
     */
+#if !defined(SQLITE_BUILDING_FOR_COMDB2)
     codeCursorHint(pTabItem, pWInfo, pLevel, pRangeEnd);
+#endif /* !defined(SQLITE_BUILDING_FOR_COMDB2) */
     regBase = codeAllEqualityTerms(pParse,pLevel,bRev,nExtraReg,&zStartAff);
     assert( zStartAff==0 || sqlite3Strlen30(zStartAff)>=nEq );
     if( zStartAff && nTop ){
@@ -1647,6 +1737,9 @@ Bitmask sqlite3WhereCodeOneLoopStart(
     start_constraints = pRangeStart || nEq>0;
 
     /* Seek the index cursor to the start of the range. */
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    codeCursorHint(pTabItem, pWInfo, pLevel, pRangeEnd, iLevel);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     nConstraint = nEq;
     if( pRangeStart ){
       Expr *pRight = pRangeStart->pExpr->pRight;
@@ -1681,11 +1774,27 @@ Bitmask sqlite3WhereCodeOneLoopStart(
       ** above has already left the cursor sitting on the correct row,
       ** so no further seeking is needed */
     }else{
-      if( pLoop->wsFlags & WHERE_IN_EARLYOUT ){
-        sqlite3VdbeAddOp1(v, OP_SeekHit, iIdxCur);
-      }
       op = aStartOp[(start_constraints<<2) + (startEq<<1) + bRev];
       assert( op!=0 );
+      if( (pLoop->wsFlags & WHERE_IN_SEEKSCAN)!=0 && op==OP_SeekGE ){
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+        // NC: Patch that introduced Bignull has not been backported yet
+        //assert( regBignull==0 );
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
+        assert( regBignull==0 );
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
+        /* TUNING:  The OP_SeekScan opcode seeks to reduce the number
+        ** of expensive seek operations by replacing a single seek with
+        ** 1 or more step operations.  The question is, how many steps
+        ** should we try before giving up and going with a seek.  The cost
+        ** of a seek is proportional to the logarithm of the of the number
+        ** of entries in the tree, so basing the number of steps to try
+        ** on the estimated number of rows in the btree seems like a good
+        ** guess. */
+        addrSeekScan = sqlite3VdbeAddOp1(v, OP_SeekScan, 
+                                         (pIdx->aiRowLogEst[0]+9)/10);
+        VdbeCoverage(v);
+      }
       sqlite3VdbeAddOp4Int(v, op, iIdxCur, addrNxt, regBase, nConstraint);
       VdbeCoverage(v);
       VdbeCoverageIf(v, op==OP_Rewind);  testcase( op==OP_Rewind );
@@ -1700,8 +1809,19 @@ Bitmask sqlite3WhereCodeOneLoopStart(
     ** range (if any).
     */
     nConstraint = nEq;
+    assert( pLevel->p2==0 );
     if( pRangeEnd ){
       Expr *pRight = pRangeEnd->pExpr->pRight;
+      if( addrSeekScan ){
+        /* For a seek-scan that has a range on the lowest term of the index,
+        ** we have to make the top of the loop be code that sets the end
+        ** condition of the range.  Otherwise, the OP_SeekScan might jump
+        ** over that initialization, leaving the range-end value set to the
+        ** range-start value, resulting in a wrong answer.
+        ** See ticket 5981a8c041a3c2f3 (2021-11-02).
+        */
+        pLevel->p2 = sqlite3VdbeCurrentAddr(v);
+      }
       codeExprOrVector(pParse, pRight, regBase+nEq, nTop);
       whereLikeOptimizationStringFixup(v, pLevel, pRangeEnd);
       if( (pRangeEnd->wtFlags & TERM_VNULL)==0
@@ -1733,7 +1853,7 @@ Bitmask sqlite3WhereCodeOneLoopStart(
     sqlite3DbFree(db, zEndAff);
 
     /* Top of the loop body */
-    pLevel->p2 = sqlite3VdbeCurrentAddr(v);
+    if( pLevel->p2==0 ) pLevel->p2 = sqlite3VdbeCurrentAddr(v);
 
     /* Check if the index cursor is past the end of the range. */
     if( nConstraint ){
@@ -1743,10 +1863,11 @@ Bitmask sqlite3WhereCodeOneLoopStart(
       testcase( op==OP_IdxGE );  VdbeCoverageIf(v, op==OP_IdxGE );
       testcase( op==OP_IdxLT );  VdbeCoverageIf(v, op==OP_IdxLT );
       testcase( op==OP_IdxLE );  VdbeCoverageIf(v, op==OP_IdxLE );
+      if( addrSeekScan ) sqlite3VdbeJumpHere(v, addrSeekScan);
     }
 
-    if( pLoop->wsFlags & WHERE_IN_EARLYOUT ){
-      sqlite3VdbeAddOp2(v, OP_SeekHit, iIdxCur, 1);
+    if( (pLoop->wsFlags & WHERE_IN_EARLYOUT)!=0 ){
+      sqlite3VdbeAddOp3(v, OP_SeekHit, iIdxCur, nEq, nEq);
     }
 
     /* Seek the table cursor, if required */
@@ -1755,17 +1876,7 @@ Bitmask sqlite3WhereCodeOneLoopStart(
     if( omitTable ){
       /* pIdx is a covering index.  No need to access the main table. */
     }else if( HasRowid(pIdx->pTable) ){
-      if( (pWInfo->wctrlFlags & WHERE_SEEK_TABLE) || (
-          (pWInfo->wctrlFlags & WHERE_SEEK_UNIQ_TABLE) 
-       && (pWInfo->eOnePass==ONEPASS_SINGLE)
-      )){
-        iRowidReg = ++pParse->nMem;
-        sqlite3VdbeAddOp2(v, OP_IdxRowid, iIdxCur, iRowidReg);
-        sqlite3VdbeAddOp3(v, OP_NotExists, iCur, 0, iRowidReg);
-        VdbeCoverage(v);
-      }else{
-        codeDeferredSeek(pWInfo, pIdx, iCur, iIdxCur);
-      }
+      codeDeferredSeek(pWInfo, pIdx, iCur, iIdxCur);
     }else if( iCur!=iIdxCur ){
       Index *pPk = sqlite3PrimaryKeyIndex(pIdx->pTable);
       iRowidReg = sqlite3GetTempRange(pParse, pPk->nKeyCol);
@@ -1879,7 +1990,6 @@ Bitmask sqlite3WhereCodeOneLoopStart(
     int iRetInit;                             /* Address of regReturn init */
     int untestedTerms = 0;             /* Some terms not completely tested */
     int ii;                            /* Loop counter */
-    u16 wctrlFlags;                    /* Flags for sub-WHERE clause */
     Expr *pAndExpr = 0;                /* An ".. AND (...)" expression */
     Table *pTab = pTabItem->pTab;
 
@@ -1980,7 +2090,6 @@ Bitmask sqlite3WhereCodeOneLoopStart(
     ** eliminating duplicates from other WHERE clauses, the action for each
     ** sub-WHERE clause is to to invoke the main loop body as a subroutine.
     */
-    wctrlFlags =  WHERE_OR_SUBCLAUSE | (pWInfo->wctrlFlags & WHERE_SEEK_TABLE);
     ExplainQueryPlan((pParse, 1, "MULTI-INDEX OR"));
     for(ii=0; ii<pOrWc->nTerm; ii++){
       WhereTerm *pOrTerm = &pOrWc->a[ii];
@@ -1999,7 +2108,7 @@ Bitmask sqlite3WhereCodeOneLoopStart(
         ExplainQueryPlan((pParse, 1, "INDEX %d", ii+1));
         WHERETRACE(0xffff, ("Subplan for OR-clause:\n"));
         pSubWInfo = sqlite3WhereBegin(pParse, pOrTab, pOrExpr, 0, 0,
-                                      wctrlFlags, iCovCur);
+                                      WHERE_OR_SUBCLAUSE, iCovCur);
         assert( pSubWInfo || pParse->nErr || db->mallocFailed );
         if( pSubWInfo ){
           WhereLoop *pSubLoop;
@@ -2097,6 +2206,9 @@ Bitmask sqlite3WhereCodeOneLoopStart(
           }else{
             pCov = 0;
           }
+          if( sqlite3WhereUsesDeferredSeek(pSubWInfo) ){
+            pWInfo->bDeferredSeek = 1;
+          }
 
           /* Finish the loop through table entries that match term pOrTerm. */
           sqlite3WhereEnd(pSubWInfo);
@@ -2132,7 +2244,11 @@ Bitmask sqlite3WhereCodeOneLoopStart(
       ** a pseudo-cursor.  No need to Rewind or Next such cursors. */
       pLevel->op = OP_Noop;
     }else{
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+      codeCursorHint(pTabItem, pWInfo, pLevel, 0, iLevel);
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
       codeCursorHint(pTabItem, pWInfo, pLevel, 0);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
       pLevel->op = aStep[bRev];
       pLevel->p1 = iCur;
       pLevel->p2 = 1 + sqlite3VdbeAddOp2(v, aStart[bRev], iCur, addrHalt);
@@ -2196,16 +2312,16 @@ Bitmask sqlite3WhereCodeOneLoopStart(
         ** can skip the call to the like(A,B) function.  But this only works
         ** for strings.  So do not skip the call to the function on the pass
         ** that compares BLOBs. */
-#ifdef SQLITE_LIKE_DOESNT_MATCH_BLOBS
+#if defined(SQLITE_BUILDING_FOR_COMDB2) || defined(SQLITE_LIKE_DOESNT_MATCH_BLOBS)
         continue;
-#else
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) || defined(SQLITE_LIKE_DOESNT_MATCH_BLOBS) */
         u32 x = pLevel->iLikeRepCntr;
         if( x>0 ){
           skipLikeAddr = sqlite3VdbeAddOp1(v, (x&1)?OP_IfNot:OP_If,(int)(x>>1));
           VdbeCoverageIf(v, (x&1)==1);
           VdbeCoverageIf(v, (x&1)==0);
         }
-#endif
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) || defined(SQLITE_LIKE_DOESNT_MATCH_BLOBS) */
       }
 #ifdef WHERETRACE_ENABLED /* 0xffff */
       if( sqlite3WhereTrace ){

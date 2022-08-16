@@ -55,6 +55,10 @@
 #define CC_DOT       26    /* '.' */
 #define CC_ILLEGAL   27    /* Illegal character */
 #define CC_NUL       28    /* 0x00 */
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+#define CC_LB        29    /* '{' */
+#define CC_RB        30    /* '}' */
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 
 static const unsigned char aiClass[] = {
 #ifdef SQLITE_ASCII
@@ -66,7 +70,11 @@ static const unsigned char aiClass[] = {
 /* 4x */    5,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
 /* 5x */    1,  1,  1,  1,  1,  1,  1,  1,  0,  1,  1,  9, 27, 27, 27,  1,
 /* 6x */    8,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+/* 7x */    1,  1,  1,  1,  1,  1,  1,  1,  0,  1,  1, 29, 10, 30, 25, 27,
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 /* 7x */    1,  1,  1,  1,  1,  1,  1,  1,  0,  1,  1, 27, 10, 27, 25, 27,
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 /* 8x */    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
 /* 9x */    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
 /* Ax */    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
@@ -90,8 +98,13 @@ static const unsigned char aiClass[] = {
 /* 9x */   27,  1,  1,  1,  1,  1,  1,  1,  1,  1, 27, 27, 27, 27, 27, 27,
 /* Ax */   27, 25,  1,  1,  1,  1,  1,  0,  1,  1, 27, 27, 27, 27, 27, 27,
 /* Bx */   27, 27, 27, 27, 27, 27, 27, 27, 27, 27,  9, 27, 27, 27, 27, 27,
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+/* Cx */   29,  1,  1,  1,  1,  1,  1,  1,  1,  1, 27, 27, 27, 27, 27, 27,
+/* Dx */   30,  1,  1,  1,  1,  1,  1,  1,  1,  1, 27, 27, 27, 27, 27, 27,
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 /* Cx */   27,  1,  1,  1,  1,  1,  1,  1,  1,  1, 27, 27, 27, 27, 27, 27,
 /* Dx */   27,  1,  1,  1,  1,  1,  1,  1,  1,  1, 27, 27, 27, 27, 27, 27,
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 /* Ex */   27, 27,  1,  1,  1,  1,  1,  0,  1,  1, 27, 27, 27, 27, 27, 27,
 /* Fx */    3,  3,  3,  3,  3,  3,  3,  3,  3,  3, 27, 27, 27, 27, 27, 27,
 #endif
@@ -504,12 +517,37 @@ int sqlite3GetToken(const unsigned char *z, int *tokenType){
         /* This token started out using characters that can appear in keywords,
         ** but z[i] is a character not allowed within keywords, so this must
         ** be an identifier instead */
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+        /* Special cases for COMDB2 */
+        if( i==5 && sqlite3StrNICmp((char*)z,"genid",5)==0 && z[i]=='4'
+            && z[i+1]=='8' && !IdChar(z[i+2]) ){
+          *tokenType = TK_GENID48;
+          return 7;
+        }else if( i==2 && sqlite3StrNICmp((char*)z,"lz",2)==0 && z[i]=='4'
+            && !IdChar(z[i+1]) ){
+          *tokenType = TK_LZ4;
+          return 3;
+        }
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
         i++;
         break;
       }
       *tokenType = TK_ID;
       return keywordCode((char*)z, i, tokenType);
     }
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    case CC_LB: {
+      /*
+      ** NOTE: This code assumes that the curly braced block represents the
+      **       last token in the string.  For backward compatibility, there
+      **       is no checking for unmatched curly braces.
+      */
+      for(i=1; (c=z[i])!=0; i++){}
+      testcase( z[i-1]=='}' );  testcase( z[i-1]!='}' );
+      *tokenType = z[i-1]=='}' ? TK_NOSQL : TK_ILLEGAL;
+      return i;
+    }
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     case CC_X: {
 #ifndef SQLITE_OMIT_BLOB_LITERAL
       testcase( z[0]=='x' ); testcase( z[0]=='X' );
@@ -760,7 +798,11 @@ char *sqlite3Normalize(
   int j;             /* Bytes of normalized SQL generated so far */
   sqlite3_str *pStr; /* The normalized SQL string under construction */
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  db = pVdbe ? sqlite3VdbeDb(pVdbe) : 0;
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   db = sqlite3VdbeDb(pVdbe);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   tokenType = -1;
   nParen = iStartIN = nParenAtIN = 0;
   pStr = sqlite3_str_new(db);
@@ -814,7 +856,11 @@ char *sqlite3Normalize(
         iStartIN = 0;
         j = pStr->nChar;
         if( sqlite3Isquote(zSql[i]) ){
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+          char *zId = sqlite3_mprintf("%.*s", n, zSql+i);
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
           char *zId = sqlite3DbStrNDup(db, zSql+i, n);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
           int nId;
           int eType = 0;
           if( zId==0 ) break;
@@ -842,6 +888,13 @@ char *sqlite3Normalize(
         }
         break;
       }
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+      case TK_NOSQL: {
+        addSpaceSeparator(pStr);
+        sqlite3_str_append(pStr, zSql+i, n);
+        break;
+      }
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
       case TK_SELECT: {
         iStartIN = 0;
         /* fall through */

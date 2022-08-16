@@ -137,6 +137,14 @@
 */
 #include "sqliteInt.h"
 #include "vdbeInt.h"
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+#include <sys/types.h>
+#include <inttypes.h>
+#include <cheapstack.h>
+#include <sys/time.h>
+
+int comdb2_tmpdir_space_low();
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 
 /* 
 ** If SQLITE_DEBUG_SORTER_THREADS is defined, this module outputs various
@@ -157,15 +165,20 @@
 /*
 ** Private objects used by the sorter
 */
+#if !defined(SQLITE_BUILDING_FOR_COMDB2)
 typedef struct MergeEngine MergeEngine;     /* Merge PMAs together */
 typedef struct PmaReader PmaReader;         /* Incrementally read one PMA */
+#endif /* !defined(SQLITE_BUILDING_FOR_COMDB2) */
 typedef struct PmaWriter PmaWriter;         /* Incrementally write one PMA */
+#if !defined(SQLITE_BUILDING_FOR_COMDB2)
 typedef struct SorterRecord SorterRecord;   /* A record being sorted */
 typedef struct SortSubtask SortSubtask;     /* A sub-task in the sort process */
 typedef struct SorterFile SorterFile;       /* Temporary file object wrapper */
 typedef struct SorterList SorterList;       /* In-memory list of records */
+#endif /* !defined(SQLITE_BUILDING_FOR_COMDB2) */
 typedef struct IncrMerger IncrMerger;       /* Read & merge multiple PMAs */
 
+#if !defined(SQLITE_BUILDING_FOR_COMDB2)
 /*
 ** A container for a temp file handle and the current amount of data 
 ** stored in the file.
@@ -188,6 +201,7 @@ struct SorterList {
   u8 *aMemory;                    /* If non-NULL, bulk memory to hold pList */
   int szPMA;                      /* Size of pList as PMA in bytes */
 };
+#endif /* !defined(SQLITE_BUILDING_FOR_COMDB2) */
 
 /*
 ** The MergeEngine object is used to combine two or more smaller PMAs into
@@ -260,6 +274,7 @@ struct MergeEngine {
   PmaReader *aReadr;         /* Array of PmaReaders to merge data from */
 };
 
+#if !defined(SQLITE_BUILDING_FOR_COMDB2)
 /*
 ** This object represents a single thread of control in a sort operation.
 ** Exactly VdbeSorter.nTask instances of this object are allocated
@@ -334,6 +349,7 @@ struct VdbeSorter {
   u8 typeMask;
   SortSubtask aTask[1];           /* One or more subtasks */
 };
+#endif /* !defined(SQLITE_BUILDING_FOR_COMDB2) */
 
 #define SORTER_TYPE_INTEGER 0x01
 #define SORTER_TYPE_TEXT    0x02
@@ -670,6 +686,10 @@ static int vdbePmaReaderSeek(
   return rc;
 }
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+#include <vdbecompare.c>
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
+
 /*
 ** Advance PmaReader pReadr to the next key in its PMA. Return SQLITE_OK if
 ** no error occurs, or an SQLite error code if one does.
@@ -794,6 +814,10 @@ static int vdbeSorterCompare(
   }
   return sqlite3VdbeRecordCompare(nKey1, pKey1, r2);
 }
+
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+extern int gbl_sqlite_sorter_mem;
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 
 /*
 ** A specially optimized version of vdbeSorterCompare() that assumes that
@@ -968,6 +992,12 @@ int sqlite3VdbeSorterInit(
   if( pSorter==0 ){
     rc = SQLITE_NOMEM_BKPT;
   }else{
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    pSorter->nfind = 0;
+    pSorter->nmove = 0;
+    pSorter->nwrite = 0;
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
+
     pSorter->pKeyInfo = pKeyInfo = (KeyInfo*)((u8*)pSorter + sz);
     memcpy(pKeyInfo, pCsr->pKeyInfo, szKeyInfo);
     pKeyInfo->db = 0;
@@ -989,6 +1019,10 @@ int sqlite3VdbeSorterInit(
       u32 szPma = sqlite3GlobalConfig.szPma;
       pSorter->mnPmaSize = szPma * pgsz;
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+      UNUSED_PARAMETER(mxCache);
+      pSorter->mxPmaSize = gbl_sqlite_sorter_mem;
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
       mxCache = db->aDb[0].pSchema->cache_size;
       if( mxCache<0 ){
         /* A negative cache-size value C indicates that the cache is abs(C)
@@ -999,6 +1033,7 @@ int sqlite3VdbeSorterInit(
       }
       mxCache = MIN(mxCache, SQLITE_MAX_PMASZ);
       pSorter->mxPmaSize = MAX(pSorter->mnPmaSize, (int)mxCache);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 
       /* Avoid large memory allocations if the application has requested
       ** SQLITE_CONFIG_SMALL_MALLOC. */
@@ -1258,6 +1293,9 @@ void sqlite3VdbeSorterClose(sqlite3 *db, VdbeCursor *pCsr){
   assert( pCsr->eCurType==CURTYPE_SORTER );
   pSorter = pCsr->uc.pSorter;
   if( pSorter ){
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    addVdbeSorterCost(pSorter);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     sqlite3VdbeSorterReset(db, pSorter);
     sqlite3_free(pSorter->list.aMemory);
     sqlite3DbFree(db, pSorter);
@@ -1565,6 +1603,13 @@ static int vdbeSorterListToPMA(SortSubtask *pTask, SorterList *pList){
     assert( pTask->nPMA==0 );
   }
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  i64 nByte = pTask->file.iEof+pList->szPMA+9;
+  i64 lmt = (1<<27);
+  /* if nByte > 124MB and we are running low on free space*/
+  if(nByte > lmt && comdb2_tmpdir_space_low())
+     rc = SQLITE_TOOBIG;
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   /* Try to get the file to memory map */
   if( rc==SQLITE_OK ){
     vdbeSorterExtendFile(db, pTask->file.pFd, pTask->file.iEof+pList->szPMA+9);
@@ -1773,6 +1818,12 @@ int sqlite3VdbeSorterWrite(
   assert( pCsr->eCurType==CURTYPE_SORTER );
   pSorter = pCsr->uc.pSorter;
   getVarint32((const u8*)&pVal->z[1], t);
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  if( t==10 || t==11 ){
+    /* I need this for interval and datetime */
+    pSorter->typeMask = 0;
+  }else
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   if( t>0 && t<10 && t!=7 ){
     pSorter->typeMask &= SORTER_TYPE_INTEGER;
   }else if( t>10 && (t & 0x01) ){
@@ -1782,6 +1833,10 @@ int sqlite3VdbeSorterWrite(
   }
 
   assert( pSorter );
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  addVdbeToThdCost(VDBESORTER_WRITE);
+  pSorter->nwrite++;
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 
   /* Figure out whether or not the current contents of memory should be
   ** flushed to a PMA before continuing. If so, do so.
@@ -2580,6 +2635,9 @@ int sqlite3VdbeSorterRewind(const VdbeCursor *pCsr, int *pbEof){
   pSorter = pCsr->uc.pSorter;
   assert( pSorter );
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  pSorter->nfind++;
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   /* If no data has been written to disk, then do not do so now. Instead,
   ** sort the VdbeSorter.pRecord list. The vdbe layer will read data directly
   ** from the in-memory list.  */
@@ -2630,6 +2688,10 @@ int sqlite3VdbeSorterNext(sqlite3 *db, const VdbeCursor *pCsr){
 
   assert( pCsr->eCurType==CURTYPE_SORTER );
   pSorter = pCsr->uc.pSorter;
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  addVdbeToThdCost(VDBESORTER_MOVE);
+  pSorter->nmove++;
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   assert( pSorter->bUsePMA || (pSorter->pReader==0 && pSorter->pMerger==0) );
   if( pSorter->bUsePMA ){
     assert( pSorter->pReader==0 || pSorter->pMerger==0 );

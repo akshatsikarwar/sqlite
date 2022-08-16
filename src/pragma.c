@@ -1546,8 +1546,13 @@ void sqlite3Pragma(
 
         if( pTab->tnum<1 ) continue;  /* Skip VIEWs or VIRTUAL TABLEs */
         pPk = HasRowid(pTab) ? 0 : sqlite3PrimaryKeyIndex(pTab);
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+        sqlite3OpenTableAndIndices(pParse, pTab, OP_OpenRead, 0,
+                                   1, 0, &iDataCur, &iIdxCur, OE_None, 0);
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
         sqlite3OpenTableAndIndices(pParse, pTab, OP_OpenRead, 0,
                                    1, 0, &iDataCur, &iIdxCur);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
         /* reg[7] counts the number of entries in the table.
         ** reg[8+i] counts the number of entries in the i-th index 
         */

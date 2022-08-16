@@ -18,7 +18,10 @@
 ** with SQLITE_DEBUG.
 */
 #include "sqliteInt.h"
-#ifdef SQLITE_DEBUG
+#if defined(SQLITE_BUILDING_FOR_COMDB2) || defined(SQLITE_DEBUG)
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+#include "logmsg.h"
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 
 /*
 ** Add a new subitem to the tree.  The moreToFollow flag indicates that this
@@ -70,8 +73,12 @@ static void sqlite3TreeViewLine(TreeView *p, const char *zFormat, ...){
     sqlite3_str_append(&acc, "\n", 1);
   }
   sqlite3StrAccumFinish(&acc);
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  logmsg(LOGMSG_USER, "%s", zBuf);
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   fprintf(stdout,"%s", zBuf);
   fflush(stdout);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 }
 
 /*
@@ -724,4 +731,4 @@ void sqlite3TreeViewExprList(
   sqlite3TreeViewPop(pView);
 }
 
-#endif /* SQLITE_DEBUG */
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) || defined(SQLITE_DEBUG) */

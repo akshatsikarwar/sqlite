@@ -16,6 +16,12 @@
 */
 #include "sqliteInt.h"
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+int sqlite3IsComdb2Rowid(Table *pTab, const char *);
+int sqlite3IsComdb2RowTimestamp(Table *pTab, const char *);
+int is_comdb2_index_blob(const char *dbname, int icol);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
+
 /*
 ** Walk the expression tree pExpr and increase the aggregate function
 ** depth (the Expr.op2 field) by N on every TK_AGG_FUNCTION node.
@@ -262,9 +268,11 @@ static int lookupName(
           if( sqlite3StrICmp(zTabName, zTab)!=0 ){
             continue;
           }
+#if !defined(SQLITE_BUILDING_FOR_COMDB2)
           if( IN_RENAME_OBJECT && pItem->zAlias ){
             sqlite3RenameTokenRemap(pParse, 0, (void*)&pExpr->y.pTab);
           }
+#endif /* !defined(SQLITE_BUILDING_FOR_COMDB2) */
         }
         if( 0==(cntTab++) ){
           pMatch = pItem;
@@ -398,6 +406,33 @@ static int lookupName(
       pExpr->iColumn = -1;
       pExpr->affinity = SQLITE_AFF_INTEGER;
     }
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    /*
+    ** if it's a "comdb2_rowid" set a magic -2 for the column (instead of
+    ** the usual magic -1 for a "rowid."  inside of sqlite3exprcode we sniff
+    ** this out, and when we see a -2, we add a properly formulated
+    ** instruction (OP_Rowid with P3==1 (instead of the usual 0).
+    ** the vm sniffs this out when it runs OP_Rowid and executes the comdb2
+    ** backend call to get the rrn+genid.
+    */
+    else if( cnt==0 && cntTab==1 && pMatch && sqlite3IsComdb2Rowid(pMatch->pTab, zCol) ){
+       cnt = 1;
+       pExpr->iColumn = -2;
+       pExpr->affinity = SQLITE_AFF_TEXT;
+    }else if( cnt==0 && cntTab==1 && pMatch && sqlite3IsComdb2RowTimestamp(pMatch->pTab, zCol) ){
+       cnt = 1;
+       pExpr->iColumn = -3;
+       pExpr->affinity = SQLITE_AFF_TEXT;
+    }
+
+    /* Check if a partial index or an expression index contains blob fields. */
+    if( (pNC->ncFlags & (NC_PartIdx|NC_IdxExpr))!=0
+     && pExpr->y.pTab
+     && pExpr->iColumn>=0
+    ){
+      is_comdb2_index_blob(pExpr->y.pTab->zName, pExpr->iColumn);
+    }
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 
     /*
     ** If the input is of the form Z (not Y.Z or X.Y.Z) then the name Z
@@ -447,9 +482,11 @@ static int lookupName(
           cnt = 1;
           pMatch = 0;
           assert( zTab==0 && zDb==0 );
+#if !defined(SQLITE_BUILDING_FOR_COMDB2)
           if( IN_RENAME_OBJECT ){
             sqlite3RenameTokenRemap(pParse, 0, (void*)pExpr);
           }
+#endif /* !defined(SQLITE_BUILDING_FOR_COMDB2) */
           goto lookupname_end;
         }
       } 
@@ -666,6 +703,9 @@ static int resolveExprStep(Walker *pWalker, Expr *pExpr){
       assert( pSrcList && pSrcList->nSrc==1 );
       pItem = pSrcList->a;
       assert( HasRowid(pItem->pTab) && pItem->pTab->pSelect==0 );
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+      assert( HasRowid(pItem->pTab) && pItem->pTab->pSelect==0);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
       pExpr->op = TK_COLUMN;
       pExpr->y.pTab = pItem->pTab;
       pExpr->iTable = pItem->iCursor;
@@ -709,10 +749,12 @@ static int resolveExprStep(Walker *pWalker, Expr *pExpr){
         }
         zTable = pLeft->u.zToken;
         zColumn = pRight->u.zToken;
+#if !defined(SQLITE_BUILDING_FOR_COMDB2)
         if( IN_RENAME_OBJECT ){
           sqlite3RenameTokenRemap(pParse, (void*)pExpr, (void*)pRight);
           sqlite3RenameTokenRemap(pParse, (void*)&pExpr->y.pTab, (void*)pLeft);
         }
+#endif /* !defined(SQLITE_BUILDING_FOR_COMDB2) */
       }
       return lookupName(pParse, zDb, zTable, zColumn, pNC, pExpr);
     }
@@ -845,6 +887,11 @@ static int resolveExprStep(Walker *pWalker, Expr *pExpr){
         ){
           sqlite3ErrorMsg(pParse, "no such function: %.*s", nId, zId);
           pNC->nErr++;
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+        }else if( no_such_func && (pNC->ncFlags & (NC_IdxExpr|NC_PartIdx)) ){
+          sqlite3ErrorMsg(pParse, "no such function: %.*s", nId, zId);
+          pNC->nErr++;
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
         }else if( wrong_num_args ){
           sqlite3ErrorMsg(pParse,"wrong number of arguments to function %.*s()",
                nId, zId);

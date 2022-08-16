@@ -248,13 +248,17 @@ void sqlite3BeginTrigger(
   pTrigger->pTabSchema = pTab->pSchema;
   pTrigger->op = (u8)op;
   pTrigger->tr_tm = tr_tm==TK_BEFORE ? TRIGGER_BEFORE : TRIGGER_AFTER;
+#if !defined(SQLITE_BUILDING_FOR_COMDB2)
   if( IN_RENAME_OBJECT ){
     sqlite3RenameTokenRemap(pParse, pTrigger->table, pTableName->a[0].zName);
     pTrigger->pWhen = pWhen;
     pWhen = 0;
   }else{
+#endif /* !defined(SQLITE_BUILDING_FOR_COMDB2) */
     pTrigger->pWhen = sqlite3ExprDup(db, pWhen, EXPRDUP_REDUCE);
+#if !defined(SQLITE_BUILDING_FOR_COMDB2)
   }
+#endif /* !defined(SQLITE_BUILDING_FOR_COMDB2) */
   pTrigger->pColumns = pColumns;
   pColumns = 0;
   assert( pParse->pNewTrigger==0 );
@@ -327,7 +331,11 @@ void sqlite3FinishTrigger(
     z = sqlite3DbStrNDup(db, (char*)pAll->z, pAll->n);
     testcase( z==0 );
     sqlite3NestedParse(pParse,
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+       "INSERT INTO %Q.%s VALUES('trigger',%Q,%Q,0,'CREATE TRIGGER %q', NULL)",
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
        "INSERT INTO %Q.%s VALUES('trigger',%Q,%Q,0,'CREATE TRIGGER %q')",
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
        db->aDb[iDb].zDbSName, MASTER_NAME, zName,
        pTrig->table, z);
     sqlite3DbFree(db, z);
@@ -418,9 +426,11 @@ static TriggerStep *triggerStepAllocate(
     pTriggerStep->zTarget = z;
     pTriggerStep->op = op;
     pTriggerStep->zSpan = triggerSpanDup(db, zStart, zEnd);
+#if !defined(SQLITE_BUILDING_FOR_COMDB2)
     if( IN_RENAME_OBJECT ){
       sqlite3RenameTokenMap(pParse, pTriggerStep->zTarget, pName);
     }
+#endif /* !defined(SQLITE_BUILDING_FOR_COMDB2) */
   }
   return pTriggerStep;
 }
@@ -963,6 +973,9 @@ static TriggerPrg *codeRowTrigger(
     transferParseError(pParse, pSubParse);
     if( db->mallocFailed==0 && pParse->nErr==0 ){
       pProgram->aOp = sqlite3VdbeTakeOpArray(v, &pProgram->nOp, &pTop->nMaxArg);
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+      sqlite3VdbeTransferTables(pParse->pVdbe, pSubParse->pVdbe);
+#endif
     }
     pProgram->nMem = pSubParse->nMem;
     pProgram->nCsr = pSubParse->nTab;

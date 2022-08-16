@@ -82,6 +82,24 @@ struct SortCtx {
 };
 #define SORTFLAG_UseSorter  0x01   /* Use SorterOpen instead of OpenEphemeral */
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+extern int comdb2_register_limit(int, int);
+extern void comdb2_register_offset(int, int, int);
+extern const char *comdb2_get_dbname(void);
+extern void comdb2_set_verify_remote_schemas(void);
+
+static void _set_src_recording(
+  Parse *pParse,
+  Select *pSub
+){
+  int tbl;
+  pSub->recording = 1;
+  for(tbl=0; tbl<pSub->pSrc->nSrc; tbl++){
+    SET_CURSOR_RECORDING(pParse, pSub->pSrc->a[tbl].iCursor);
+  }
+}
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
+
 /*
 ** Delete all the content of a Select structure.  Deallocate the structure
 ** itself only if bFree is true.
@@ -139,6 +157,9 @@ Select *sqlite3SelectNew(
   Select standin;
   pNew = sqlite3DbMallocRawNN(pParse->db, sizeof(*pNew) );
   if( pNew==0 ){
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    return NULL;
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     assert( pParse->db->mallocFailed );
     pNew = &standin;
   }
@@ -164,6 +185,9 @@ Select *sqlite3SelectNew(
   pNew->pPrior = 0;
   pNew->pNext = 0;
   pNew->pLimit = pLimit;
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  pNew->recording = 0;
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   pNew->pWith = 0;
 #ifndef SQLITE_OMIT_WINDOWFUNC
   pNew->pWin = 0;
@@ -1551,6 +1575,11 @@ static void generateSortTail(
 #ifndef SQLITE_OMIT_SUBQUERY
     case SRT_Set: {
       assert( nColumn==sqlite3Strlen30(pDest->zAffSdst) );
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+      /* FIXME TODO XXX 
+       * This might be incorrect. prod has some hack to make the following
+       * use numeric type. The opcodes here have changed. Need to verify */
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
       sqlite3VdbeAddOp4(v, OP_MakeRecord, regRow, nColumn, regRowid,
                         pDest->zAffSdst, nColumn);
       sqlite3VdbeAddOp4Int(v, OP_IdxInsert, iParm, regRowid, regRow, nColumn);
@@ -1641,8 +1670,13 @@ static const char *columnTypeImpl(
   char const *zOrigCol = 0;
 #endif
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  /* I need this "bug" to return "wrong" types for comdb2sql */
+  if( NEVER(pExpr==0) || pNC->pSrcList==0 ) return 0;
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   assert( pExpr!=0 );
   assert( pNC->pSrcList!=0 );
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   assert( pExpr->op!=TK_AGG_COLUMN );  /* This routine runes before aggregates
                                        ** are processed */
   switch( pExpr->op ){
@@ -1711,8 +1745,21 @@ static const char *columnTypeImpl(
         if( iCol<0 ) iCol = pTab->iPKey;
         assert( iCol==XN_ROWID || (iCol>=0 && iCol<pTab->nCol) );
         if( iCol<0 ){
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+          switch( iCol ){
+            default:
+              zType = "INTEGER";
+              zOrigCol = "rowid";
+              break;
+            case -3:
+              zType = "DATETIME";
+              zOrigCol = "comdb2_rowtimestamp";
+              break;
+          }
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
           zType = "INTEGER";
           zOrigCol = "rowid";
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
         }else{
           zOrigCol = pTab->aCol[iCol].zName;
           zType = sqlite3ColumnType(&pTab->aCol[iCol],0);
@@ -1861,7 +1908,9 @@ static void generateColumnNames(
   pTabList = pSelect->pSrc;
   pEList = pSelect->pEList;
   assert( v!=0 );
+#if !defined(SQLITE_BUILDING_FOR_COMDB2)
   assert( pTabList!=0 );
+#endif /* !defined(SQLITE_BUILDING_FOR_COMDB2) */
   pParse->colNamesSet = 1;
   fullName = (db->flags & SQLITE_FullColNames)!=0;
   srcName = (db->flags & SQLITE_ShortColNames)!=0 || fullName;
@@ -1884,7 +1933,18 @@ static void generateColumnNames(
       if( iCol<0 ) iCol = pTab->iPKey;
       assert( iCol==-1 || (iCol>=0 && iCol<pTab->nCol) );
       if( iCol<0 ){
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+        switch( iCol ){
+          default:
+            zCol = "rowid";
+            break;
+          case -3:
+            zCol = "comdb2_rowtimestamp";
+            break;
+        }
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
         zCol = "rowid";
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
       }else{
         zCol = pTab->aCol[iCol].zName;
       }
@@ -2188,6 +2248,12 @@ static void computeLimitRegisters(Parse *pParse, Select *p, int iBreak){
       VdbeComment((v, "LIMIT counter"));
       sqlite3VdbeAddOp2(v, OP_IfNot, iLimit, iBreak); VdbeCoverage(v);
     }
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    int is_parallel;
+    if( (is_parallel = comdb2_register_limit(iLimit, ++pParse->nMem))!=0 ){
+      sqlite3VdbeAddOp2(v, OP_IntCopy, iLimit, pParse->nMem);
+    }
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     if( pLimit->pRight ){
       p->iOffset = iOffset = ++pParse->nMem;
       pParse->nMem++;   /* Allocate an extra register for limit+offset */
@@ -2196,6 +2262,12 @@ static void computeLimitRegisters(Parse *pParse, Select *p, int iBreak){
       VdbeComment((v, "OFFSET counter"));
       sqlite3VdbeAddOp3(v, OP_OffsetLimit, iLimit, iOffset+1, iOffset);
       VdbeComment((v, "LIMIT+OFFSET"));
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+      if( is_parallel ){
+        comdb2_register_offset(iOffset, iOffset+1, ++pParse->nMem);
+        sqlite3VdbeAddOp2(v, OP_IntCopy, iOffset, pParse->nMem);
+      }
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     }
   }
 }
@@ -2744,6 +2816,9 @@ static int multiSelect(
         assert( p->pOrderBy==0 );
   
         addr = sqlite3VdbeAddOp2(v, OP_OpenEphemeral, tab1, 0);
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+        sqlite3VdbeChangeP5(v, BTREE_UNORDERED); 
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
         assert( p->addrOpenEphm[0] == -1 );
         p->addrOpenEphm[0] = addr;
         findRightmost(p)->selFlags |= SF_UsesEphemeral;
@@ -3771,6 +3846,12 @@ static int flattenSubquery(
   ** See also tickets #306, #350, and #3300.
   */
   if( (pSubitem->fg.jointype & JT_OUTER)!=0 ){
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    extern int gbl_enable_sq_flattening_optimization;
+    if (!gbl_enable_sq_flattening_optimization) {
+      return 0;
+    }
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     isLeftJoin = 1;
     if( pSubSrc->nSrc>1 || isAgg || IsVirtual(pSubSrc->a[0].pTab) ){
       /*  (3a)             (3c)     (3b) */
@@ -3884,6 +3965,9 @@ static int flattenSubquery(
     p->pLimit = 0;
     pNew = sqlite3SelectDup(db, p, 0);
     p->pLimit = pLimit;
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    if( p->recording ) _set_src_recording(pParse, pSub);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     p->pOrderBy = pOrderBy;
     p->pSrc = pSrc;
     p->op = TK_ALL;
@@ -3905,6 +3989,9 @@ static int flattenSubquery(
   */
   pSub = pSub1 = pSubitem->pSelect;
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  if( p->recording ) _set_src_recording(pParse, pSub);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   /* Delete the transient table structure associated with the
   ** subquery
   */
@@ -4850,7 +4937,11 @@ static int selectExpander(Walker *pWalker, Select *p){
   /* Make sure cursor numbers have been assigned to all entries in
   ** the FROM clause of the SELECT statement.
   */
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  sqlite3SrcListAssignCursors(pParse, pTabList, p->recording);
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   sqlite3SrcListAssignCursors(pParse, pTabList);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 
   /* Look up every table named in the FROM clause of the select.  If
   ** an entry of the FROM clause is a subquery instead of a table or view,
@@ -5398,6 +5489,29 @@ static void explainSimpleCount(
 # define explainSimpleCount(a,b,c)
 #endif
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+/*
+**
+** Check list of identified source tables and check to see any of them is remote
+**
+*/
+static int sql_has_remotes(
+  Parse *pParse,       /* The parsing context */
+  SrcList *pList        /* The source list */
+) {
+  int i;
+
+  for(i=0;i<pList->nSrc; i++){
+    char *dbname = pList->a[i].zDatabase;
+    if(dbname && strcasecmp(dbname,"main") && strcasecmp(dbname, "temp") &&
+            strcasecmp(dbname, comdb2_get_dbname())) {
+      return 1;
+    }
+  }
+  return 0;
+}
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
+
 /*
 ** sqlite3WalkExpr() callback used by havingToWhere().
 **
@@ -5506,7 +5620,8 @@ static struct SrcList_item *isSelfJoinView(
 **   *  The subquery is a UNION ALL of two or more terms
 **   *  The subquery does not have a LIMIT clause
 **   *  There is no WHERE or GROUP BY or HAVING clauses on the subqueries
-**   *  The outer query is a simple count(*)
+**   *  The outer query is a simple count(*) with no WHERE clause or other
+**      extraneous syntax.
 **
 ** Return TRUE if the optimization is undertaken.
 */
@@ -5517,6 +5632,8 @@ static int countOfViewOptimization(Parse *pParse, Select *p){
   sqlite3 *db;
   if( (p->selFlags & SF_Aggregate)==0 ) return 0;   /* This is an aggregate */
   if( p->pEList->nExpr!=1 ) return 0;               /* Single result column */
+  if( p->pWhere ) return 0;
+  if( p->pGroupBy ) return 0;
   pExpr = p->pEList->a[0].pExpr;
   if( pExpr->op!=TK_AGG_FUNCTION ) return 0;        /* Result is an aggregate */
   if( sqlite3_stricmp(pExpr->u.zToken,"count") ) return 0;  /* Is count() */
@@ -5642,6 +5759,15 @@ int sqlite3Select(
   }
   sqlite3SelectPrep(pParse, p, 0);
   if( pParse->nErr || db->mallocFailed ){
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    if( pParse->checkSchema == 1 /* parsing error */ && 
+            pParse->zErrMsg && strncasecmp(pParse->zErrMsg, "no such column", 
+                strlen("no such column")) == 0){
+      if (sql_has_remotes(pParse, p->pSrc)) {
+        comdb2_set_verify_remote_schemas();
+      }
+    }
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     goto select_end;
   }
   assert( p->pEList!=0 );
@@ -5755,6 +5881,10 @@ int sqlite3Select(
   }
 #endif
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  ast_t *ast = ast_init(pParse, __func__);
+  if( ast ) ast_push(ast, AST_TYPE_SELECT, v, p);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 #ifndef SQLITE_OMIT_COMPOUND_SELECT
   /* Handle compound SELECT statements using the separate multiSelect()
   ** procedure.
@@ -5969,6 +6099,17 @@ int sqlite3Select(
   }
 #endif
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+#ifdef SQLITE_COUNTOFVIEW_OPTIMIZATION
+  if( OptimizationEnabled(db, SQLITE_QueryFlattener|SQLITE_CountOfView)
+   && countOfViewOptimization(pParse, p)
+  ){
+    if( db->mallocFailed ) goto select_end;
+    pEList = p->pEList;
+    pTabList = p->pSrc;
+  }
+#endif
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   /* If the query is DISTINCT with an ORDER BY but is not an aggregate, and 
   ** if the select-list is the same as the ORDER BY list, then this query
   ** can be rewritten as a GROUP BY. In other words, this:
@@ -6484,6 +6625,10 @@ int sqlite3Select(
         int iRoot = pTab->tnum;              /* Root page of scanned b-tree */
 
         sqlite3CodeVerifySchema(pParse, iDb);
+
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+        sqlite3VdbeAddTable(v, pTab);
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
         sqlite3TableLock(pParse, iDb, pTab->tnum, 0, pTab->zName);
 
         /* Search for the index that has the lowest scan cost.
@@ -6505,12 +6650,31 @@ int sqlite3Select(
             pBest = pIdx;
           }
         }
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+        /* prefer data-btree if parallel count is enabled */
+        extern int gbl_direct_count;
+        extern int gbl_parallel_count;
+        int use_data = gbl_direct_count && gbl_parallel_count;
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
         if( pBest ){
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+          if( use_data==0 ){
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
           iRoot = pBest->tnum;
           pKeyInfo = sqlite3KeyInfoOfIndex(pParse, pBest);
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+          }
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
         }
 
         /* Open a read-only cursor, execute the OP_Count, close the cursor. */
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+        /* TODO: use op4 ? */
+        if( p->recording ){
+            /* sqlite3VdbeAddOp3(v, OP_OpenRead_Record, iCsr, iRoot, iDb); */
+            sqlite3VdbeAddOp4Int(v, OP_OpenRead_Record, iCsr, iRoot, iDb, 1);
+        }else
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
         sqlite3VdbeAddOp4Int(v, OP_OpenRead, iCsr, iRoot, iDb, 1);
         if( pKeyInfo ){
           sqlite3VdbeChangeP4(v, -1, (char *)pKeyInfo, P4_KEYINFO);

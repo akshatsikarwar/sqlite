@@ -16,6 +16,10 @@
 #include "sqliteInt.h"
 #include "vdbeInt.h"
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+#include "logmsg.h"
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
+
 #ifndef SQLITE_OMIT_DEPRECATED
 /*
 ** Return TRUE (non-zero) of the statement supplied as an argument needs
@@ -87,6 +91,135 @@ static SQLITE_NOINLINE void invokeProfileCallback(sqlite3 *db, Vdbe *p){
 # define checkProfileCallback(DB,P)  /*no-op*/
 #endif
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+extern int gbl_old_column_names;
+
+char *stmt_column_name(sqlite3_stmt *pStmt, int index) {
+  Vdbe *vdbe = (Vdbe *)pStmt;
+  if (!vdbe) {
+    logmsg(LOGMSG_ERROR, "%s:%d stmt handle not set\n", __func__, __LINE__);
+    return 0;
+  }
+  return (char *) sqlite3_value_text((sqlite3_value*)&vdbe->aColName[index]);
+}
+
+char *stmt_cached_column_name(sqlite3_stmt *pStmt, int index) {
+  char **column_names;
+  Vdbe *vdbe = (Vdbe *)pStmt;
+
+  if (!vdbe) {
+    logmsg(LOGMSG_ERROR, "%s:%d stmt handle not set\n", __func__, __LINE__);
+    return 0;
+  }
+  column_names = vdbe->oldColNames;
+  return column_names[index];
+}
+
+char *stmt_column_decltype(sqlite3_stmt *pStmt, int index) {
+  Vdbe *vdbe = (Vdbe *)pStmt;
+  if (!vdbe) {
+    logmsg(LOGMSG_ERROR, "%s:%d stmt handle not set\n", __func__, __LINE__);
+    return 0;
+  }
+  index += COLNAME_DECLTYPE * sqlite3_column_count(pStmt);
+  char *ret = (char *) sqlite3_value_text((sqlite3_value*)&vdbe->aColName[index]);
+  if (ret == NULL)
+      return "text";
+  return ret;
+}
+
+char *stmt_cached_column_decltype(sqlite3_stmt *pStmt, int index) {
+  char **column_decltypes;
+  Vdbe *vdbe = (Vdbe *)pStmt;
+
+  if (!vdbe) {
+    logmsg(LOGMSG_ERROR, "%s:%d stmt handle not set\n", __func__, __LINE__);
+    return 0;
+  }
+  column_decltypes = vdbe->oldColDeclTypes;
+  return column_decltypes[index];
+}
+
+
+int stmt_cached_column_count(sqlite3_stmt *pStmt) {
+  Vdbe *vdbe = (Vdbe *)pStmt;
+  return (vdbe) ? vdbe->oldColCount : 0;
+}
+
+static void stmt_free_column_names(sqlite3_stmt *pStmt) {
+  Vdbe *vdbe;
+  int column_count;
+  int i;
+  char **column_names;
+  char **column_decltypes;
+
+  vdbe = (Vdbe *)pStmt;
+  if (!vdbe)
+    return;
+
+  column_names = vdbe->oldColNames;
+  column_count = vdbe->oldColCount;
+  column_decltypes = vdbe->oldColDeclTypes;
+  for(i=0; i<column_count; i++) {
+    free(column_names[i]);
+    free(column_decltypes[i]);
+  }
+  free(column_names);
+  free(column_decltypes);
+
+  vdbe->oldColNames = 0;
+  vdbe->oldColDeclTypes = 0;
+  vdbe->oldColCount = 0;
+}
+
+void stmt_set_cached_columns(sqlite3_stmt *pStmt, char **column_names,
+                             char **column_decltypes, 
+                             int column_count) {
+  Vdbe *vdbe = (Vdbe *)pStmt;
+
+  /* Free current cached names (if any) */
+  stmt_free_column_names(pStmt);
+
+  vdbe->oldColNames = column_names;
+  vdbe->oldColDeclTypes = column_decltypes;
+  vdbe->oldColCount = column_count;
+}
+
+#define COLUMN_MATCH_COMMON(pStmt) \
+  int cached_column_count;        \
+  int i;                          \
+  if( gbl_old_column_names==0 || (stmt_cached_column_count(pStmt)==0) ||  \
+      (sqlite3_column_count(pStmt)==0) ){                                 \
+    return 1;                     \
+  }                               \
+  cached_column_count = stmt_cached_column_count(pStmt);        \
+  assert(cached_column_count == sqlite3_column_count(pStmt));
+
+int stmt_do_column_names_match(sqlite3_stmt *pStmt) {
+  COLUMN_MATCH_COMMON(pStmt);
+  Vdbe *p;
+  p = (Vdbe *)pStmt;
+  for(i=0; i<cached_column_count; i++){
+    if( (strcmp((const char *)sqlite3_value_text((sqlite3_value*)&p->aColName[i]),
+                stmt_cached_column_name(pStmt, i)))!=0 ) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+int stmt_do_column_decltypes_match(sqlite3_stmt *pStmt) {
+  COLUMN_MATCH_COMMON(pStmt);
+  for(i=0; i<cached_column_count; i++){
+    if((strcmp(stmt_column_decltype(pStmt, i), stmt_cached_column_decltype(pStmt, i)))!=0) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
+
 /*
 ** The following routine destroys a virtual machine that is created by
 ** the sqlite3_compile() routine. The integer returned is an SQLITE_
@@ -104,6 +237,11 @@ int sqlite3_finalize(sqlite3_stmt *pStmt){
     rc = SQLITE_OK;
   }else{
     Vdbe *v = (Vdbe*)pStmt;
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    if (gbl_old_column_names && (stmt_cached_column_count(pStmt)>0)){
+      stmt_free_column_names(pStmt);
+    }
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     sqlite3 *db = v->db;
     if( vdbeSafety(v) ) return SQLITE_MISUSE_BKPT;
     sqlite3_mutex_enter(db->mutex);
@@ -114,6 +252,32 @@ int sqlite3_finalize(sqlite3_stmt *pStmt){
   }
   return rc;
 }
+
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+/* reset the tspec of a VM. */
+int sqlite3_resetclock(sqlite3_stmt *pStmt){
+  int rc;
+  if( pStmt==0 ){
+    rc = SQLITE_OK;
+  }else{
+    Vdbe *v = (Vdbe*)pStmt;
+    sqlite3_mutex_enter(v->db->mutex);
+    rc = sqlite3VdbeResetClock(v);
+    sqlite3_mutex_leave(v->db->mutex);
+  }
+  return rc;
+}
+
+char *stmt_tzname(sqlite3_stmt *pStmt){
+  return ((Vdbe *)pStmt)->tzname;
+}
+
+void stmt_set_dtprec(sqlite3_stmt *pStmt, int precision){
+  /* It's the caller's (currently only Lua)
+     responsiblity to validate the precision */
+  ((Vdbe *)pStmt)->dtprec = precision;
+}
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 
 /*
 ** Terminate the current execution of an SQL statement and reset it
@@ -140,6 +304,36 @@ int sqlite3_reset(sqlite3_stmt *pStmt){
   }
   return rc;
 }
+
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+/*
+** Check if there are remote dbs in the statement
+** Default, sqlite in comdb2 has 2 dbs, "main" and "temp"
+** Anything else is a remote db.
+*/
+int sqlite3_stmt_has_remotes(
+  sqlite3_stmt *pStmt
+){
+  Vdbe *v = (Vdbe*)pStmt;
+  int rc = 0;
+
+  if( v ){
+    sqlite3_mutex_enter(v->db->mutex);
+#if SQLITE_MAX_ATTACHED>30
+    /* v->btreeMask is an array */
+    if( v->btreeMask[0]>=4 ){
+      rc = 1;
+    }else{
+      rc = !sqlite3DbMaskAllZero(v->btreeMask, 1);
+    }
+#else
+    rc = (v->btreeMask>=4);
+#endif
+    sqlite3_mutex_leave(v->db->mutex);
+  }
+  return rc;
+}
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 
 /*
 ** Set all the parameters in the compiled SQL statement to NULL.
@@ -169,6 +363,33 @@ int sqlite3_clear_bindings(sqlite3_stmt *pStmt){
 ** The following routines extract information from a Mem or sqlite3_value
 ** structure.
 */
+
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+const dttz_t *sqlite3_value_datetime(sqlite3_value *pVal){
+  Mem *p = (Mem*)pVal;
+  if( !(p->flags & MEM_Datetime )){
+    if( sqlite3VdbeMemDatetimefy(pVal) ){
+        logmsg(LOGMSG_ERROR, "sqlite3_value_datetime: failed conversion\n");
+    }
+  }
+  return &p->du.dt;
+}
+const intv_t *sqlite3_value_interval(sqlite3_value *pVal, int type){
+  Mem *p = (Mem*)pVal;
+  if( !(p->flags & MEM_Interval) ){
+    if( type == SQLITE_DECIMAL ){
+      if( sqlite3VdbeMemDecimalfy(pVal) ){
+          logmsg(LOGMSG_ERROR, "sqlite3_value_interval: failed decimal conversion\n");
+      }
+    }else{
+      if( sqlite3VdbeMemIntervalfy(pVal, type) ){
+          logmsg(LOGMSG_ERROR, "sqlite3_value_interval: failed conversion\n");
+      }
+    }
+  }
+  return &p->du.tv;
+}
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 const void *sqlite3_value_blob(sqlite3_value *pVal){
   Mem *p = (Mem*)pVal;
   if( p->flags & (MEM_Blob|MEM_Str) ){
@@ -267,6 +488,23 @@ int sqlite3_value_type(sqlite3_value* pVal){
      SQLITE_INTEGER,  /* 0x1e */
      SQLITE_NULL,     /* 0x1f */
   };
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  if( pVal->flags&MEM_Interval ){
+    switch( pVal->du.tv.type ){
+      case INTV_YM_TYPE:
+        return SQLITE_INTERVAL_YM;
+      case INTV_DS_TYPE:
+        return SQLITE_INTERVAL_DS;
+      case INTV_DSUS_TYPE:
+        return SQLITE_INTERVAL_DSUS;
+      default:
+        return SQLITE_DECIMAL;
+    }
+  }else if( pVal->flags&MEM_Datetime ){
+    return (pVal->du.dt.dttz_prec==DTTZ_PREC_USEC) ?
+        SQLITE_DATETIMEUS : SQLITE_DATETIME;
+  }
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   return aType[pVal->flags&MEM_AffMask];
 }
 
@@ -279,6 +517,36 @@ int sqlite3_value_nochange(sqlite3_value *pVal){
 int sqlite3_value_frombind(sqlite3_value *pVal){
   return (pVal->flags&MEM_FromBind)!=0;
 }
+
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+inline int sqlite3_hasResultSet(
+  sqlite3_stmt *pStmt
+){
+  Vdbe *pVm = (Vdbe *)pStmt;
+  if( pVm && pVm->pResultSet!=0 ){
+    return 1;
+  }
+  return 0;
+}
+inline int sqlite3_hasNColumns(
+  sqlite3_stmt *pStmt,
+  int n
+){
+  Vdbe *pVm = (Vdbe *)pStmt;
+  if( pVm && pVm->pResultSet!=0 && n==pVm->nResColumn ){
+    return 1;
+  }
+  return 0;
+}
+inline int sqlite3_isColumnNullType(
+  sqlite3_stmt *pStmt,
+  int i
+){
+  Vdbe *pVm = (Vdbe *)pStmt;
+  Mem *pOut = &pVm->pResultSet[i];
+  return pOut->flags & 0x1; /* odd last bit is SQLITE_NULL */
+}
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 
 /* Make a copy of an sqlite3_value object
 */
@@ -500,6 +768,18 @@ void sqlite3_result_error_code(sqlite3_context *pCtx, int errCode){
   }
 }
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+void sqlite3_result_datetime(sqlite3_context *pCtx, dttz_t *dt, const char *tz){
+  sqlite3VdbeMemSetDatetime(pCtx->pOut, dt, tz);
+}
+void sqlite3_result_interval(sqlite3_context *pCtx, intv_t *pValue){
+  sqlite3VdbeMemSetInterval(pCtx->pOut, pValue);
+}
+void sqlite3_result_decimal(sqlite3_context *pCtx, decQuad *dec){
+  sqlite3VdbeMemSetDecimal(pCtx->pOut, dec);
+}
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
+
 /* Force an SQLITE_TOOBIG error. */
 void sqlite3_result_error_toobig(sqlite3_context *pCtx){
   assert( sqlite3_mutex_held(pCtx->pOut->db->mutex) );
@@ -636,6 +916,9 @@ static int sqlite3Step(Vdbe *p){
     db->nVdbeExec--;
   }
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  if( rc==SQLITE_COMDB2SCHEMA ) return rc;
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   if( rc!=SQLITE_ROW ){
 #ifndef SQLITE_OMIT_TRACE
     /* If the statement completed successfully, invoke the profile callback */
@@ -663,9 +946,11 @@ end_of_step:
   ** contains the value that would be returned if sqlite3_finalize() 
   ** were called on statement p.
   */
+#if !defined(SQLITE_BUILDING_FOR_COMDB2)
   assert( rc==SQLITE_ROW  || rc==SQLITE_DONE   || rc==SQLITE_ERROR 
        || (rc&0xff)==SQLITE_BUSY || rc==SQLITE_MISUSE
   );
+#endif /* !defined(SQLITE_BUILDING_FOR_COMDB2) */
   assert( (p->rc!=SQLITE_ROW && p->rc!=SQLITE_DONE) || p->rc==p->rcApp );
   if( rc!=SQLITE_ROW 
    && rc!=SQLITE_DONE
@@ -700,6 +985,12 @@ int sqlite3_step(sqlite3_stmt *pStmt){
   while( (rc = sqlite3Step(v))==SQLITE_SCHEMA
          && cnt++ < SQLITE_MAX_SCHEMA_RETRY ){
     int savedPc = v->pc;
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    if( rc==SQLITE_COMDB2SCHEMA ){
+      sqlite3_mutex_leave(db->mutex);
+      return rc;
+    }
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
     rc = sqlite3Reprepare(v);
     if( rc!=SQLITE_OK ){
       /* This case occurs after failing to recompile an sql statement. 
@@ -967,7 +1258,14 @@ static const Mem *columnNullValue(void){
 #endif
     = {
         /* .u          = */ {0},
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+        /* .du         = */ {{0}},
+        /* .tz         = */ (char*)0,
+        /* .dtprec     = */ (int)0,
+        /* .flags      = */ (u32)MEM_Null,
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
         /* .flags      = */ (u16)MEM_Null,
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
         /* .enc        = */ (u8)0,
         /* .eSubtype   = */ (u8)0,
         /* .n          = */ (int)0,
@@ -1001,6 +1299,15 @@ static Mem *columnMem(sqlite3_stmt *pStmt, int i){
   sqlite3_mutex_enter(pVm->db->mutex);
   if( pVm->pResultSet!=0 && i<pVm->nResColumn && i>=0 ){
     pOut = &pVm->pResultSet[i];
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    /* we need tzname in most impossible functions
+     * so spread it around when you have it 20071010dh */
+    pOut->tz = pVm->tzname;
+    pOut->dtprec = pVm->dtprec;
+    /* Associate a db with the Mem so we can set errors on it
+     * when there's conversion failures */
+    pOut->db = ((Vdbe*) pStmt)->db;
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   }else{
     sqlite3Error(pVm->db, SQLITE_RANGE);
     pOut = (Mem*)columnNullValue();
@@ -1107,6 +1414,18 @@ int sqlite3_column_type(sqlite3_stmt *pStmt, int i){
   columnMallocFailure(pStmt);
   return iType;
 }
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+const dttz_t *sqlite3_column_datetime(sqlite3_stmt *pStmt, int i){
+  const dttz_t *dt = sqlite3_value_datetime( columnMem(pStmt,i) );
+  columnMallocFailure(pStmt);
+  return dt;
+}
+const intv_t *sqlite3_column_interval(sqlite3_stmt *pStmt, int i, int type){
+  const intv_t *intv = sqlite3_value_interval( columnMem(pStmt,i), type );
+  columnMallocFailure(pStmt);
+  return intv;
+}
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 
 /*
 ** Convert the N-th element of pStmt->pColName[] into a string using
@@ -1149,6 +1468,17 @@ static const void *columnName(
     N += useType*n;
     sqlite3_mutex_enter(db->mutex);
     assert( db->mallocFailed==0 );
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+    if( gbl_old_column_names && useUtf16 == 0 && 
+            (useType == COLNAME_NAME || useType == COLNAME_DECLTYPE) &&
+            stmt_cached_column_count(pStmt)>0 ){
+      if (useType == COLNAME_NAME) {
+          assert(N<=stmt_cached_column_count(pStmt));
+          ret = stmt_cached_column_name(pStmt, N);
+      } else if (useType == COLNAME_DECLTYPE)
+          ret = stmt_cached_column_decltype(pStmt, N-n);
+    }else
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 #ifndef SQLITE_OMIT_UTF16
     if( useUtf16 ){
       ret = sqlite3_value_text16((sqlite3_value*)&p->aColName[N]);
@@ -1341,6 +1671,65 @@ static int bindText(
   return rc;
 }
 
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+static int bindDatetime(
+  sqlite3_stmt *pStmt, 
+  int i, dttz_t *dt, char *tz
+){
+  Vdbe *p = (Vdbe *) pStmt;
+  Mem *pVar;
+  int rc;
+
+  rc = vdbeUnbind(p, i);
+  if( rc==SQLITE_OK ){
+    pVar = &p->aVar[i-1];
+    pVar->flags &= ~(MEM_Str|MEM_Static|MEM_Dyn|MEM_Ephem);
+    pVar->flags = MEM_Datetime;
+    pVar->du.dt = *dt;
+    pVar->xDel = NULL;
+    pVar->enc = 0;
+    pVar->tz = tz;
+    sqlite3_mutex_leave(p->db->mutex);
+  }
+  return rc;
+}
+
+static int bindInterval(
+  sqlite3_stmt *pStmt, 
+  int i, intv_t *it
+){
+  Vdbe *p = (Vdbe *) pStmt;
+  Mem *pVar;
+  int rc;
+
+  rc = vdbeUnbind(p, i);
+  if( rc==SQLITE_OK ){
+    pVar = &p->aVar[i-1];
+    pVar->flags = MEM_Interval;
+    pVar->flags &= ~(MEM_Str|MEM_Static|MEM_Dyn|MEM_Ephem);
+    pVar->du.tv = *it;
+    pVar->xDel = NULL;
+    pVar->enc = 0;
+    pVar->tz = NULL;
+    sqlite3_mutex_leave(p->db->mutex);
+  }
+  return rc;
+}
+
+int sqlite3_bind_datetime(
+  sqlite3_stmt *pStmt,
+  int i, dttz_t *dt, char *tz
+){
+  return bindDatetime(pStmt, i, dt, tz);
+}
+
+int sqlite3_bind_interval(
+  sqlite3_stmt *pStmt,
+  int i, intv_t *it
+){
+  return bindInterval(pStmt, i, it);
+}
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 
 /*
 ** Bind a blob value to an SQL statement variable.

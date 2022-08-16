@@ -18,6 +18,11 @@
 /*
 ** Trace output macros
 */
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+extern int sqlite3WhereTrace;
+# define WHERETRACE(K,X)  if(sqlite3WhereTrace&(K)) sqlite3DebugPrintf X
+# define WHERETRACE_ENABLED 1
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 #if defined(SQLITE_TEST) || defined(SQLITE_DEBUG)
 /***/ extern int sqlite3WhereTrace;
 #endif
@@ -28,6 +33,7 @@
 #else
 # define WHERETRACE(K,X)
 #endif
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 
 /* Forward references
 */
@@ -69,10 +75,10 @@ struct WhereLevel {
   int addrCont;         /* Jump here to continue with the next loop cycle */
   int addrFirst;        /* First instruction of interior of the loop */
   int addrBody;         /* Beginning of the body of this loop */
-#ifndef SQLITE_LIKE_DOESNT_MATCH_BLOBS
+#if !defined(SQLITE_BUILDING_FOR_COMDB2) && !defined(SQLITE_LIKE_DOESNT_MATCH_BLOBS)
   u32 iLikeRepCntr;     /* LIKE range processing counter register (times 2) */
   int addrLikeRep;      /* LIKE range processing address */
-#endif
+#endif /* !defined(SQLITE_BUILDING_FOR_COMDB2) && !defined(SQLITE_LIKE_DOESNT_MATCH_BLOBS) */
   u8 iFrom;             /* Which entry in the FROM clause */
   u8 op, p3, p5;        /* Opcode, P3 & P5 of the opcode that ends the loop */
   int p1, p2;           /* Operands of the opcode used to ends the loop */
@@ -113,9 +119,9 @@ struct WhereLevel {
 struct WhereLoop {
   Bitmask prereq;       /* Bitmask of other loops that must run first */
   Bitmask maskSelf;     /* Bitmask identifying table iTab */
-#ifdef SQLITE_DEBUG
+#if defined(SQLITE_BUILDING_FOR_COMDB2) || defined(SQLITE_DEBUG)
   char cId;             /* Symbolic ID of this loop for debugging use */
-#endif
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) || defined(SQLITE_DEBUG) */
   u8 iTab;              /* Position in FROM clause of table for this loop */
   u8 iSortIdx;          /* Sorting index number.  0==None */
   LogEst rSetup;        /* One-time setup cost (ex: create transient index) */
@@ -287,6 +293,12 @@ struct WhereTerm {
 #define TERM_LIKE       0x400  /* The original LIKE operator */
 #define TERM_IS         0x800  /* Term.pExpr is an IS operator */
 #define TERM_VARSELECT  0x1000 /* Term.pExpr contains a correlated sub-query */
+#define TERM_HEURTRUTH  0x2000 /* Heuristic truthProb used */
+#ifdef SQLITE_ENABLE_STAT4
+#  define TERM_HIGHTRUTH  0x4000 /* Term excludes few rows */
+#else
+#  define TERM_HIGHTRUTH  0      /* Only used with STAT4 */
+#endif
 
 /*
 ** An instance of the WhereScan object is used as an iterator for locating
@@ -401,13 +413,16 @@ struct WhereLoopBuilder {
   UnpackedRecord *pRec;     /* Probe for stat4 (if required) */
   int nRecValid;            /* Number of valid fields currently in pRec */
 #endif
-  unsigned int bldFlags;    /* SQLITE_BLDF_* flags */
+  unsigned char bldFlags1;  /* First set of SQLITE_BLDF_* flags */
+  unsigned char bldFlags2;  /* Second set of SQLITE_BLDF_* flags */
   unsigned int iPlanLimit;  /* Search limiter */
 };
 
 /* Allowed values for WhereLoopBuider.bldFlags */
-#define SQLITE_BLDF_INDEXED  0x0001   /* An index is used */
-#define SQLITE_BLDF_UNIQUE   0x0002   /* All keys of a UNIQUE index used */
+#define SQLITE_BLDF1_INDEXED  0x0001   /* An index is used */
+#define SQLITE_BLDF1_UNIQUE   0x0002   /* All keys of a UNIQUE index used */
+
+#define SQLITE_BLDF2_2NDPASS  0x0004   /* Second builder pass needed */
 
 /* The WhereLoopBuilder.iPlanLimit is used to limit the number of
 ** index+constraint combinations the query planner will consider for a
@@ -455,10 +470,12 @@ struct WhereInfo {
   i8 nOBSat;                /* Number of ORDER BY terms satisfied by indices */
   u8 sorted;                /* True if really sorted (not just grouped) */
   u8 eOnePass;              /* ONEPASS_OFF, or _SINGLE, or _MULTI */
+  u8 bDeferredSeek;         /* Uses OP_DeferredSeek */
   u8 untestedTerms;         /* Not all WHERE terms resolved by outer loop */
   u8 eDistinct;             /* One of the WHERE_DISTINCT_* values */
   u8 bOrderedInnerLoop;     /* True if only the inner-most loop is ordered */
   int iTop;                 /* The very beginning of the WHERE loop */
+  int iEndWhere;            /* End of the WHERE clause itself */
   WhereLoop *pLoops;        /* List of all WhereLoop objects */
   Bitmask revMask;          /* Mask of ORDER BY terms that need reversing */
   LogEst nRowOut;           /* Estimated number of output rows */
@@ -584,3 +601,4 @@ void sqlite3WhereTabFuncArgs(Parse*, struct SrcList_item*, WhereClause*);
 #define WHERE_UNQ_WANTED   0x00010000  /* WHERE_ONEROW would have been helpful*/
 #define WHERE_PARTIALIDX   0x00020000  /* The automatic index is partial */
 #define WHERE_IN_EARLYOUT  0x00040000  /* Perhaps quit IN loops early */
+#define WHERE_IN_SEEKSCAN  0x00100000  /* Seek-scan optimization for IN */

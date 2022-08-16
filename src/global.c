@@ -221,7 +221,11 @@ SQLITE_WSD struct Sqlite3Config sqlite3Config = {
    SQLITE_MAX_MMAP_SIZE,      /* mxMmap */
    (void*)0,                  /* pPage */
    0,                         /* szPage */
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+   0,                         /* nPage */
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
    SQLITE_DEFAULT_PCACHE_INITSZ, /* nPage */
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
    0,                         /* mxParserStack */
    0,                         /* sharedCacheEnabled */
    SQLITE_SORTER_PMASZ,       /* szPma */

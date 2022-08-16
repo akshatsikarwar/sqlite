@@ -126,10 +126,26 @@ static malloc_zone_t* _sqliteZone_;
 ** routines.
 */
 static void *sqlite3MemMalloc(int nByte){
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  extern unsigned gbl_blob_sz_thresh_bytes;
+#ifndef USE_SYS_ALLOC
+  extern comdb2bma blobmem;
+#endif
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
 #ifdef SQLITE_MALLOCSIZE
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  void *p;
+  testcase( ROUND8(nByte)==nByte );
+  if( nByte>gbl_blob_sz_thresh_bytes ){
+    p = comdb2_bmalloc( blobmem, nByte );
+  }else{
+    p = SQLITE_MALLOC( nByte );
+  }
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   void *p;
   testcase( ROUND8(nByte)==nByte );
   p = SQLITE_MALLOC( nByte );
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   if( p==0 ){
     testcase( sqlite3GlobalConfig.xLog!=0 );
     sqlite3_log(SQLITE_NOMEM, "failed to allocate %u bytes of memory", nByte);
@@ -139,7 +155,15 @@ static void *sqlite3MemMalloc(int nByte){
   sqlite3_int64 *p;
   assert( nByte>0 );
   testcase( ROUND8(nByte)!=nByte );
+#if defined(SQLITE_BUILDING_FOR_COMDB2)
+  if( nByte>gbl_blob_sz_thresh_bytes ){
+    p = comdb2_bmalloc( blobmem, nByte+8 );
+  }else{
+    p = SQLITE_MALLOC( nByte+8 );
+  }
+#else /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   p = SQLITE_MALLOC( nByte+8 );
+#endif /* defined(SQLITE_BUILDING_FOR_COMDB2) */
   if( p ){
     p[0] = nByte;
     p++;
